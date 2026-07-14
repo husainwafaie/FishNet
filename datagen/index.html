@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>fishnet — synthetic data generator</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <canvas id="overlay"></canvas>
+    <div id="hud">
+      <h1>fishnet <span>datagen</span></h1>
+      <div class="row">
+        <button id="btn-relayout">Randomize layout <kbd>R</kbd></button>
+        <button id="btn-overlay">Boxes: on <kbd>B</kbd></button>
+      </div>
+      <div class="row">
+        <button id="btn-capture-1">Capture 1</button>
+        <button id="btn-capture-100">Capture 100</button>
+      </div>
+      <div id="status">idle</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

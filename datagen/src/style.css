@@ -1,0 +1,81 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #04101a;
+}
+
+#app canvas {
+  display: block;
+}
+
+/* Label overlay sits on top of the WebGL canvas but never eats input */
+#overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+#hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  padding: 10px 12px;
+  background: rgba(4, 16, 26, 0.82);
+  border: 1px solid rgba(140, 200, 230, 0.25);
+  border-radius: 8px;
+  color: #cfeaf5;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  user-select: none;
+}
+
+#hud h1 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+}
+
+#hud h1 span {
+  opacity: 0.5;
+  font-weight: normal;
+}
+
+#hud .row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+#hud button {
+  flex: 1;
+  padding: 5px 8px;
+  background: rgba(140, 200, 230, 0.12);
+  border: 1px solid rgba(140, 200, 230, 0.3);
+  border-radius: 5px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#hud button:hover {
+  background: rgba(140, 200, 230, 0.25);
+}
+
+#hud button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#hud kbd {
+  opacity: 0.5;
+  font-size: 10px;
+}
+
+#status {
+  margin-top: 4px;
+  opacity: 0.75;
+  min-height: 14px;
+}
