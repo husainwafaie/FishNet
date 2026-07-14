@@ -23,12 +23,21 @@ export interface FishBox {
   distance: number;
   /** Fog transmittance at that distance (0 = fully fogged, 1 = clear). */
   visibility: number;
+  /**
+   * COCO-style ignore region: the fish is visible but too small to be a
+   * trustworthy positive (a speck). Training should mask these regions out
+   * of the loss rather than treat them as background — otherwise visible
+   * fish the labeler skipped would teach the detector to miss small fish.
+   */
+  ignore?: true;
 }
 
 /** Below this transmittance a fish is invisible in the murk — not labeled. */
 const MIN_VISIBILITY = 0.12;
-/** Boxes smaller than this (after viewport clamping) aren't meaningful. */
+/** Boxes at least this big (after viewport clamping) are real positives. */
 const MIN_AREA_PX = 80;
+/** Boxes between this and MIN_AREA_PX become ignore regions; below, drop. */
+const IGNORE_AREA_PX = 6;
 /** Require this fraction of the box to survive viewport clamping. */
 const MIN_INSIDE_FRACTION = 0.25;
 
@@ -94,10 +103,12 @@ export function computeLabels(
       const y1 = THREE.MathUtils.clamp(maxY, 0, height);
       const w = x1 - x0;
       const h = y1 - y0;
-      if (w * h < MIN_AREA_PX) continue;
-      if (fullArea > 0 && (w * h) / fullArea < MIN_INSIDE_FRACTION) continue;
+      const area = w * h;
+      if (area < IGNORE_AREA_PX) continue;
+      if (fullArea > 0 && area / fullArea < MIN_INSIDE_FRACTION) continue;
 
       boxes.push({
+        ...(area < MIN_AREA_PX ? { ignore: true as const } : {}),
         species: group.cfg.name,
         classId: group.cfg.classId,
         x: Math.round(x0),

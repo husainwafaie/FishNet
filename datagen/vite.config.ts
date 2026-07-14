@@ -58,5 +58,10 @@ function datasetWriter(): Plugin {
 
 export default defineConfig({
   plugins: [datasetWriter()],
-  server: { port: 5175 },
+  server: {
+    port: 5175,
+    // Windows 8.3 short paths (e.g. HUSAIN~1) don't match Vite's resolved
+    // allow-list entries; this is a local-only dev tool, so relax the check
+    fs: { strict: false },
+  },
 });

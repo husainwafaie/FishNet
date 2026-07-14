@@ -90,12 +90,13 @@ function resize(): void {
 window.addEventListener('resize', resize);
 resize();
 
-const clock = new THREE.Clock();
+const timer = new THREE.Timer();
 renderer.setAnimationLoop(() => {
   if (capturing) return;
+  timer.update();
   controls.update();
   env.update(camera.position.y);
-  field.update(clock.getElapsedTime());
+  field.update(timer.getElapsed());
   renderer.render(scene, camera);
   if (showBoxes) {
     overlay.draw(computeLabels(camera, field, window.innerWidth, window.innerHeight));

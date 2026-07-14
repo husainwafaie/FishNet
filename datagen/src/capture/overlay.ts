@@ -32,6 +32,14 @@ export class Overlay {
     ctx.lineWidth = 1.5;
 
     for (const box of boxes) {
+      if (box.ignore) {
+        // Ignore regions: dashed grey, no label — visible but not positives
+        ctx.strokeStyle = 'rgba(200, 200, 200, 0.5)';
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(box.x, box.y, box.w, box.h);
+        ctx.setLineDash([]);
+        continue;
+      }
       const color = colorByClass.get(box.classId) ?? '#ffffff';
       ctx.strokeStyle = color;
       ctx.strokeRect(box.x, box.y, box.w, box.h);
