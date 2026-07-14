@@ -4,6 +4,7 @@ import { createEnvironment } from './scene/environment';
 import { FishField } from './scene/FishField';
 import { computeLabels } from './capture/labeler';
 import { Overlay } from './capture/overlay';
+import { captureBatch } from './capture/recorder';
 import './style.css';
 
 const app = document.getElementById('app')!;
@@ -47,6 +48,37 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'b' || e.key === 'B') toggleOverlay();
 });
 
+// ── Capture ──────────────────────────────────────────────────────────────
+const statusEl = document.getElementById('status')!;
+const captureButtons = [
+  document.getElementById('btn-capture-1') as HTMLButtonElement,
+  document.getElementById('btn-capture-100') as HTMLButtonElement,
+];
+let capturing = false;
+
+async function runCapture(count: number): Promise<void> {
+  if (capturing) return;
+  capturing = true; // pauses the interactive loop — capture owns the camera
+  captureButtons.forEach((b) => (b.disabled = true));
+  overlay.clear();
+  try {
+    await captureBatch(count, { renderer, scene, camera, field, env }, (done, total) => {
+      statusEl.textContent = `capturing ${done}/${total}…`;
+    });
+    statusEl.textContent = `saved ${count} sample${count === 1 ? '' : 's'} to dataset/`;
+  } catch (err) {
+    statusEl.textContent = String(err);
+  } finally {
+    // Hand the camera back to the user in a sane state
+    camera.fov = 60;
+    camera.updateProjectionMatrix();
+    capturing = false;
+    captureButtons.forEach((b) => (b.disabled = false));
+  }
+}
+captureButtons[0].addEventListener('click', () => void runCapture(1));
+captureButtons[1].addEventListener('click', () => void runCapture(100));
+
 function resize(): void {
   const w = window.innerWidth;
   const h = window.innerHeight;
@@ -60,6 +92,7 @@ resize();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  if (capturing) return;
   controls.update();
   env.update(camera.position.y);
   field.update(clock.getElapsedTime());
