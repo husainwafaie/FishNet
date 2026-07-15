@@ -1,4 +1,4 @@
-# fishnet
+# FishNet
 
 [![CI](https://github.com/husainwafaie/FishNet/actions/workflows/ci.yml/badge.svg)](https://github.com/husainwafaie/FishNet/actions/workflows/ci.yml)
 
