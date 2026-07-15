@@ -1,5 +1,7 @@
 # fishnet
 
+[![CI](https://github.com/husainwafaie/FishNet/actions/workflows/ci.yml/badge.svg)](https://github.com/husainwafaie/FishNet/actions/workflows/ci.yml)
+
 Synthetic-data fish detection — an end-to-end ML project. A procedural three.js
 underwater scene generates unlimited, perfectly labeled training images; a PyTorch
 model learns to detect and classify fish species in them; the trained model ships
