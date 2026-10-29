@@ -2,9 +2,11 @@ import json
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
-from fishnet.crops import CropDataset, crop_window
+from fishnet.augment import IMAGENET_MEAN, IMAGENET_STD, Preprocess
+from fishnet.crops import CropSet, DeviceCrops, crop_window
 from fishnet.labels import Box, load_samples
 from fishnet.metrics import binned_accuracy, confusion_matrix, summarize
 
@@ -45,10 +47,36 @@ def test_crop_dataset_skips_ignore_and_preserves_labels(tmp_path):
              "camera": {"position": [0, -10, 0], "target": [0, 0, 0], "fov": 60}, "boxes": boxes}
     (tmp_path / "labels" / "s0.json").write_text(json.dumps(label))
 
-    ds = CropDataset(load_samples(tmp_path), size=32, train=False)
-    assert len(ds) == 1
-    x, y = ds[0]
-    assert tuple(x.shape) == (3, 32, 32) and int(y) == 2
+    crops = CropSet(load_samples(tmp_path), size=32)
+    assert len(crops) == 1
+    assert tuple(crops.images.shape) == (1, 3, 32, 32) and crops.images.dtype == torch.uint8
+    assert crops.labels.tolist() == [2]
+
+
+def test_device_crops_batches_cover_every_index_once():
+    images = torch.arange(10, dtype=torch.uint8).view(10, 1, 1, 1).expand(10, 3, 2, 2).contiguous()
+    dev = DeviceCrops(images, torch.arange(10))
+    seen = torch.cat([y for _, y in dev.batches(batch_size=3, shuffle=True)])
+    assert sorted(seen.tolist()) == list(range(10))
+
+
+def test_preprocess_eval_is_deterministic_and_normalised():
+    x = torch.full((4, 3, 16, 16), 128, dtype=torch.uint8)
+    pre = Preprocess(train=False)
+    out = pre(x)
+    assert out.dtype == torch.float32 and torch.equal(out, pre(x))
+    expected = (128 / 255 - torch.tensor(IMAGENET_MEAN)) / torch.tensor(IMAGENET_STD)
+    assert torch.allclose(out[0, :, 0, 0], expected, atol=1e-5)
+
+
+def test_preprocess_train_keeps_shape_and_range():
+    torch.manual_seed(0)
+    x = torch.randint(0, 256, (8, 3, 24, 24), dtype=torch.uint8)
+    out = Preprocess(train=True)(x)
+    assert out.shape == x.shape
+    lo = (0 - torch.tensor(IMAGENET_MEAN)) / torch.tensor(IMAGENET_STD)
+    hi = (1 - torch.tensor(IMAGENET_MEAN)) / torch.tensor(IMAGENET_STD)
+    assert (out >= lo.view(1, 3, 1, 1) - 1e-5).all() and (out <= hi.view(1, 3, 1, 1) + 1e-5).all()
 
 
 def test_label_class_id_mismatch_raises(tmp_path):

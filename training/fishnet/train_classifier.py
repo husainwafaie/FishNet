@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from dataclasses import dataclass
@@ -12,17 +13,17 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 
 from . import DATASET_ROOT, RUNS_ROOT
-from .crops import CropDataset
+from .augment import Preprocess
+from .crops import CropSet, DeviceCrops
 from .labels import CLASS_NAMES, NUM_CLASSES, load_samples
 from .metrics import binned_accuracy, summarize
 from .models import build_model, count_parameters
 from .plots import plot_confusion, plot_history
 from .splits import partition
 
-DEFAULT_LR = {"cnn": 3e-3, "resnet18": 1e-3}
+DEFAULT_LR = {"cnn": 1e-3, "resnet18": 1e-3}
 VISIBILITY_BINS = [0.0, 0.3, 0.5, 0.7, 1.01]
 AREA_BINS = [0, 150, 400, 1500, float("inf")]  # instance box area, px^2 at capture resolution
 
@@ -32,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--model", choices=["cnn", "resnet18"], default="cnn")
     p.add_argument("--no-pretrained", action="store_true", help="random init for resnet18")
     p.add_argument("--data", type=Path, default=DATASET_ROOT)
-    p.add_argument("--input-size", type=int, default=96)
+    p.add_argument("--input-size", type=int, default=64)
     p.add_argument("--epochs", type=int, default=25)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=None, help="peak LR (default: per-model)")
@@ -40,7 +41,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--warmup-epochs", type=float, default=1.0)
     p.add_argument("--no-class-weights", action="store_true")
     p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-name", default=None)
     return p.parse_args(argv)
@@ -59,15 +59,15 @@ class EpochResult:
     y_pred: np.ndarray
 
 
-def run_epoch(model, loader, criterion, device, use_amp, optimizer=None, scheduler=None, scaler=None) -> EpochResult:
+def run_epoch(model, batches, preprocess, criterion, use_amp, optimizer=None, scheduler=None, scaler=None) -> EpochResult:
     training = optimizer is not None
     model.train(training)
     total_loss, n = 0.0, 0
     preds, targets = [], []
     with torch.set_grad_enabled(training):
-        for x, y in loader:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
+        for x, y in batches:
+            x = preprocess(x)
+            with torch.autocast(x.device.type, dtype=torch.float16, enabled=use_amp):
                 logits = model(x)
                 loss = criterion(logits, y)
             if training:
@@ -78,9 +78,9 @@ def run_epoch(model, loader, criterion, device, use_amp, optimizer=None, schedul
                 scheduler.step()
             total_loss += loss.item() * len(y)
             n += len(y)
-            preds.append(logits.argmax(1).cpu())
-            targets.append(y.cpu())
-    return EpochResult(total_loss / n, torch.cat(targets).numpy(), torch.cat(preds).numpy())
+            preds.append(logits.argmax(1))
+            targets.append(y)
+    return EpochResult(total_loss / n, torch.cat(targets).cpu().numpy(), torch.cat(preds).cpu().numpy())
 
 
 def warmup_cosine(optimizer, warmup_steps: int, total_steps: int):
@@ -88,18 +88,18 @@ def warmup_cosine(optimizer, warmup_steps: int, total_steps: int):
         if step < warmup_steps:
             return (step + 1) / warmup_steps
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1 + np.cos(np.pi * min(progress, 1.0)))
+        return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
-def evaluate_split(model, ds: CropDataset, loader, criterion, device, use_amp) -> dict:
-    res = run_epoch(model, loader, criterion, device, use_amp)
+def evaluate_split(model, crops: CropSet, dev: DeviceCrops, batch_size, preprocess, criterion, use_amp) -> dict:
+    res = run_epoch(model, dev.batches(batch_size, shuffle=False), preprocess, criterion, use_amp)
     correct = res.y_true == res.y_pred
     summary = summarize(res.y_true, res.y_pred, CLASS_NAMES)
     summary["loss"] = res.loss
-    summary["accuracy_by_visibility"] = binned_accuracy([m.visibility for m in ds.meta], correct, VISIBILITY_BINS)
-    summary["accuracy_by_area"] = binned_accuracy([m.area for m in ds.meta], correct, AREA_BINS)
+    summary["accuracy_by_visibility"] = binned_accuracy([m.visibility for m in crops.meta], correct, VISIBILITY_BINS)
+    summary["accuracy_by_area"] = binned_accuracy([m.area for m in crops.meta], correct, AREA_BINS)
     return summary
 
 
@@ -118,25 +118,18 @@ def main(argv: list[str] | None = None) -> dict:
 
     samples = load_samples(args.data)
     parts = partition(samples, lambda s: s.key)
-    datasets = {
-        split: CropDataset(parts[split], args.input_size, train=(split == "train"), desc=f"{split} crops")
-        for split in ("train", "val", "test")
-    }
-    pin = device.type == "cuda"
-    loaders = {
-        split: DataLoader(ds, batch_size=args.batch_size, shuffle=(split == "train"),
-                          num_workers=args.workers, pin_memory=pin, drop_last=False)
-        for split, ds in datasets.items()
-    }
+    crops = {split: CropSet(parts[split], args.input_size, desc=f"{split} crops") for split in ("train", "val", "test")}
+    dev = {split: c.to(device) for split, c in crops.items()}
+    train_pre, eval_pre = Preprocess(train=True), Preprocess(train=False)
 
-    counts = datasets["train"].class_counts().float()
+    counts = crops["train"].class_counts().float()
     class_weights = None if args.no_class_weights else (counts.sum() / (NUM_CLASSES * counts.clamp(min=1)))
     train_criterion = nn.CrossEntropyLoss(weight=None if class_weights is None else class_weights.to(device))
     eval_criterion = nn.CrossEntropyLoss()
 
     model = build_model(args.model, NUM_CLASSES, pretrained=not args.no_pretrained).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
-    steps_per_epoch = len(loaders["train"])
+    steps_per_epoch = math.ceil(len(crops["train"]) / args.batch_size)
     scheduler = warmup_cosine(optimizer, int(args.warmup_epochs * steps_per_epoch), args.epochs * steps_per_epoch)
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
@@ -148,20 +141,21 @@ def main(argv: list[str] | None = None) -> dict:
         "amp": use_amp,
         "parameters": count_parameters(model),
         "split_images": {k: len(v) for k, v in parts.items()},
-        "split_instances": {k: len(v) for k, v in datasets.items()},
+        "split_instances": {k: len(v) for k, v in crops.items()},
         "train_class_counts": dict(zip(CLASS_NAMES, counts.int().tolist())),
         "class_weights": None if class_weights is None else dict(zip(CLASS_NAMES, class_weights.tolist())),
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
-    print(f"{variant}: {config['parameters']:,} params | {config['split_instances']} instances | "
+    print(f"{variant}: {config['parameters']:,} params | lr {lr:g} | {config['split_instances']} instances | "
           f"{config['device']} amp={use_amp}")
 
     history: list[dict] = []
     best_score, best_epoch = -1.0, -1
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, loaders["train"], train_criterion, device, use_amp, optimizer, scheduler, scaler)
-        va = run_epoch(model, loaders["val"], eval_criterion, device, use_amp)
+        tr = run_epoch(model, dev["train"].batches(args.batch_size, shuffle=True), train_pre,
+                       train_criterion, use_amp, optimizer, scheduler, scaler)
+        va = run_epoch(model, dev["val"].batches(args.batch_size, shuffle=False), eval_pre, eval_criterion, use_amp)
         va_summary = summarize(va.y_true, va.y_pred, CLASS_NAMES)
         row = {
             "epoch": epoch,
@@ -187,14 +181,15 @@ def main(argv: list[str] | None = None) -> dict:
     results = {
         "best_epoch": best_epoch,
         "train_seconds": round(train_seconds, 1),
-        "val": evaluate_split(model, datasets["val"], loaders["val"], eval_criterion, device, use_amp),
-        "test": evaluate_split(model, datasets["test"], loaders["test"], eval_criterion, device, use_amp),
+        **{
+            split: evaluate_split(model, crops[split], dev[split], args.batch_size, eval_pre, eval_criterion, use_amp)
+            for split in ("val", "test")
+        },
     }
     (run_dir / "history.json").write_text(json.dumps(history, indent=2))
     (run_dir / "metrics.json").write_text(json.dumps(results, indent=2))
     plot_history(history, run_dir / "curves.png")
-    plot_confusion(results["test"]["confusion"], CLASS_NAMES, run_dir / "confusion_test.png",
-                   f"{variant} — test")
+    plot_confusion(results["test"]["confusion"], CLASS_NAMES, run_dir / "confusion_test.png", f"{variant} — test")
 
     te = results["test"]
     print(f"\nbest epoch {best_epoch} ({train_seconds:.0f}s) | test acc {te['accuracy']:.3f} "

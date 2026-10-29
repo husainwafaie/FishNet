@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from . import DATASET_ROOT, RUNS_ROOT
-from .crops import CropDataset
+from .crops import CropSet
 from .labels import CLASS_NAMES, Sample, load_samples
 from .plots import plot_crop_grid
 from .splits import SPLITS, partition
@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> None:
     for s in samples[: args.overlays]:
         draw_overlay(s, overlay_dir / f"{s.key}.png")
 
-    train = CropDataset(parts["train"], args.input_size, train=False, desc="train crops")
+    train = CropSet(parts["train"], args.input_size, desc="train crops")
     plot_crop_grid(train.images, train.labels, CLASS_NAMES, args.out / "crops_train.png")
     print(f"wrote {args.out}")
 
