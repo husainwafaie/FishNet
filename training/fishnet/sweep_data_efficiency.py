@@ -10,6 +10,7 @@ import argparse
 import json
 
 import matplotlib
+import matplotlib.ticker
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -72,6 +73,9 @@ def main(argv: list[str] | None = None) -> None:
         pts = sorted((r["train_images"], r["test_balanced_accuracy"]) for r in rows if r["variant"] == variant)
         ax.plot([x for x, _ in pts], [y for _, y in pts], marker="o", label=variant)
     ax.set_xscale("log")
+    ticks = sorted({r["train_images"] for r in rows})
+    ax.set_xticks(ticks, [str(t) for t in ticks])
+    ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
     ax.set(xlabel="training images (log scale)", ylabel="test balanced accuracy",
            title="Data efficiency: scratch vs. ImageNet-pretrained")
     ax.grid(alpha=0.3)
