@@ -26,6 +26,7 @@ from .splits import partition
 DEFAULT_LR = {"cnn": 1e-3, "resnet18": 1e-3}
 VISIBILITY_BINS = [0.0, 0.3, 0.5, 0.7, 1.01]
 AREA_BINS = [0, 150, 400, 1500, float("inf")]  # instance box area, px^2 at capture resolution
+MAX_EVALS = 25  # validation checkpoints per run, regardless of epoch count
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,12 +36,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--data", type=Path, default=DATASET_ROOT)
     p.add_argument("--input-size", type=int, default=64)
     p.add_argument("--epochs", type=int, default=25)
+    p.add_argument("--min-steps", type=int, default=0, help="raise epochs until at least this many optimizer steps")
+    p.add_argument("--train-fraction", type=float, default=1.0, help="image-level subsample of the train split")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=None, help="peak LR (default: per-model)")
     p.add_argument("--weight-decay", type=float, default=0.05)
     p.add_argument("--warmup-epochs", type=float, default=1.0)
     p.add_argument("--no-class-weights", action="store_true")
-    p.add_argument("--no-amp", action="store_true")
+    p.add_argument("--amp", action="store_true",
+                   help="fp16 autocast; off by default (cuDNN fp16 kernels emit NaN on GTX 16-series)")
+    p.add_argument("--no-precise-bn", action="store_true", help="evaluate with EMA running BN stats")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-name", default=None)
     return p.parse_args(argv)
@@ -83,6 +88,15 @@ def run_epoch(model, batches, preprocess, criterion, use_amp, optimizer=None, sc
     return EpochResult(total_loss / n, torch.cat(targets).cpu().numpy(), torch.cat(preds).cpu().numpy())
 
 
+@torch.no_grad()
+def recalibrate_bn(model: nn.Module, dev: DeviceCrops, preprocess, batch_size: int) -> None:
+    """Precise BN: replace lagging EMA running stats with exact population stats.
+
+    Runs in fp32; accumulating BN statistics under fp16 autocast overflows.
+    """
+    torch.optim.swa_utils.update_bn((preprocess(x) for x, _ in dev.batches(batch_size, shuffle=False)), model)
+
+
 def warmup_cosine(optimizer, warmup_steps: int, total_steps: int):
     def factor(step: int) -> float:
         if step < warmup_steps:
@@ -107,7 +121,7 @@ def main(argv: list[str] | None = None) -> dict:
     args = parse_args(argv)
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_amp = device.type == "cuda" and not args.no_amp
+    use_amp = device.type == "cuda" and args.amp
     torch.backends.cudnn.benchmark = True
     lr = args.lr if args.lr is not None else DEFAULT_LR[args.model]
 
@@ -118,6 +132,9 @@ def main(argv: list[str] | None = None) -> dict:
 
     samples = load_samples(args.data)
     parts = partition(samples, lambda s: s.key)
+    if args.train_fraction < 1.0:
+        k = max(1, round(args.train_fraction * len(parts["train"])))
+        parts["train"] = sorted(random.Random(args.seed).sample(parts["train"], k), key=lambda s: s.key)
     crops = {split: CropSet(parts[split], args.input_size, desc=f"{split} crops") for split in ("train", "val", "test")}
     dev = {split: c.to(device) for split, c in crops.items()}
     train_pre, eval_pre = Preprocess(train=True), Preprocess(train=False)
@@ -130,13 +147,16 @@ def main(argv: list[str] | None = None) -> dict:
     model = build_model(args.model, NUM_CLASSES, pretrained=not args.no_pretrained).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
     steps_per_epoch = math.ceil(len(crops["train"]) / args.batch_size)
-    scheduler = warmup_cosine(optimizer, int(args.warmup_epochs * steps_per_epoch), args.epochs * steps_per_epoch)
+    epochs = max(args.epochs, math.ceil(args.min_steps / steps_per_epoch))
+    scheduler = warmup_cosine(optimizer, int(args.warmup_epochs * steps_per_epoch), epochs * steps_per_epoch)
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
     config = {
         **{k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
         "variant": variant,
         "lr": lr,
+        "epochs_effective": epochs,
+        "total_steps": epochs * steps_per_epoch,
         "device": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
         "amp": use_amp,
         "parameters": count_parameters(model),
@@ -152,9 +172,14 @@ def main(argv: list[str] | None = None) -> dict:
     history: list[dict] = []
     best_score, best_epoch = -1.0, -1
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    eval_every = max(1, epochs // MAX_EVALS)
+    for epoch in range(1, epochs + 1):
         tr = run_epoch(model, dev["train"].batches(args.batch_size, shuffle=True), train_pre,
                        train_criterion, use_amp, optimizer, scheduler, scaler)
+        if epoch % eval_every and epoch != epochs:
+            continue
+        if not args.no_precise_bn:
+            recalibrate_bn(model, dev["train"], eval_pre, 2 * args.batch_size)
         va = run_epoch(model, dev["val"].batches(args.batch_size, shuffle=False), eval_pre, eval_criterion, use_amp)
         va_summary = summarize(va.y_true, va.y_pred, CLASS_NAMES)
         row = {
