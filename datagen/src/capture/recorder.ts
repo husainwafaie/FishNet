@@ -38,6 +38,9 @@ export interface SampleLabel {
  * kept as a natural negative example. */
 const MAX_EMPTY_RESAMPLES = 4;
 
+/** Fixed square capture resolution, independent of the viewport. */
+export const CAPTURE_SIZE = 640;
+
 function randomizeCamera(
   camera: THREE.PerspectiveCamera,
   field: FishField,
@@ -93,6 +96,11 @@ export async function captureBatch(
   const { renderer, scene, camera, field, env } = ctx;
   const canvas = renderer.domElement;
   const runId = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+  // Resize the drawing buffer only (updateStyle=false); caller restores
+  renderer.setSize(CAPTURE_SIZE, CAPTURE_SIZE, false);
+  camera.aspect = 1;
+  camera.updateProjectionMatrix();
 
   for (let i = 0; i < count; i++) {
     let seed = 0;

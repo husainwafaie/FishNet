@@ -53,6 +53,7 @@ const statusEl = document.getElementById('status')!;
 const captureButtons = [
   document.getElementById('btn-capture-1') as HTMLButtonElement,
   document.getElementById('btn-capture-100') as HTMLButtonElement,
+  document.getElementById('btn-capture-1000') as HTMLButtonElement,
 ];
 let capturing = false;
 
@@ -69,15 +70,16 @@ async function runCapture(count: number): Promise<void> {
   } catch (err) {
     statusEl.textContent = String(err);
   } finally {
-    // Hand the camera back to the user in a sane state
+    // Restore viewport-sized buffer and interactive fov
     camera.fov = 60;
-    camera.updateProjectionMatrix();
+    resize();
     capturing = false;
     captureButtons.forEach((b) => (b.disabled = false));
   }
 }
 captureButtons[0].addEventListener('click', () => void runCapture(1));
 captureButtons[1].addEventListener('click', () => void runCapture(100));
+captureButtons[2].addEventListener('click', () => void runCapture(1000));
 
 function resize(): void {
   const w = window.innerWidth;
