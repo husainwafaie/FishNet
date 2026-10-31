@@ -15,18 +15,21 @@ class Preprocess:
     """Per-sample random hflip, resized crop (affine resample), brightness/contrast jitter.
 
     No hue/saturation jitter: colour is a class cue, and its depth-dependent
-    attenuation is the distribution shift under study.
+    attenuation is the distribution shift under study. geometric=False keeps only
+    the photometric jitter, for callers that transform labels themselves (detection).
     """
 
     def __init__(
         self,
         train: bool,
+        geometric: bool = True,
         scale: tuple[float, float] = (0.75, 1.0),
         ratio: tuple[float, float] = (0.9, 1.1),
         brightness: float = 0.2,
         contrast: float = 0.2,
     ):
         self.train = train
+        self.geometric = geometric
         self.scale, self.ratio = scale, ratio
         self.brightness, self.contrast = brightness, contrast
 
@@ -43,6 +46,11 @@ class Preprocess:
         return lo + (hi - lo) * torch.rand(n, device=like.device)
 
     def _augment(self, x: torch.Tensor) -> torch.Tensor:
+        if self.geometric:
+            x = self._geometric(x)
+        return self._photometric(x)
+
+    def _geometric(self, x: torch.Tensor) -> torch.Tensor:
         n = x.shape[0]
         flip = self._rand(n, 0, 1, x) < 0.5
         x = torch.where(flip.view(n, 1, 1, 1), x.flip(-1), x)
@@ -58,8 +66,10 @@ class Preprocess:
         zeros = torch.zeros_like(w)
         theta = torch.stack([torch.stack([w, zeros, cx], 1), torch.stack([zeros, h, cy], 1)], 1)
         grid = F.affine_grid(theta, list(x.shape), align_corners=False)
-        x = F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=False)
+        return F.grid_sample(x, grid, mode="bilinear", padding_mode="border", align_corners=False)
 
+    def _photometric(self, x: torch.Tensor) -> torch.Tensor:
+        n = x.shape[0]
         b = self._rand(n, 1 - self.brightness, 1 + self.brightness, x).view(n, 1, 1, 1)
         c = self._rand(n, 1 - self.contrast, 1 + self.contrast, x).view(n, 1, 1, 1)
         x = x * b

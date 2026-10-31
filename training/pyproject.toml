@@ -13,6 +13,7 @@ dependencies = [
   "pillow",
   "matplotlib",
   "tqdm",
+  "pycocotools",
 ]
 
 [project.optional-dependencies]

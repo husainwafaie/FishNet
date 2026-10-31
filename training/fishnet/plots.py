@@ -30,6 +30,23 @@ def plot_history(history: list[dict], path: Path) -> None:
     plt.close(fig)
 
 
+def plot_detector_history(history: list[dict], path: Path) -> None:
+    fig, (ax_loss, ax_ap) = plt.subplots(1, 2, figsize=(10, 4))
+    epochs = [h["epoch"] for h in history]
+    for key in ("loss_total", "loss_heatmap", "loss_size", "loss_offset"):
+        ax_loss.plot(epochs, [h[key] for h in history], label=key.removeprefix("loss_"))
+    ax_loss.set(xlabel="epoch", ylabel="train loss", yscale="log", title="Training loss")
+    ax_loss.legend()
+    evals = [h for h in history if "val_AP" in h]
+    for key, label in (("val_AP", "AP@[.5:.95]"), ("val_AP50", "AP50"), ("val_AR", "AR")):
+        ax_ap.plot([h["epoch"] for h in evals], [h[key] for h in evals], marker="o", label=label)
+    ax_ap.set(xlabel="epoch", ylim=(0, 1.02), title="Validation")
+    ax_ap.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
 def plot_confusion(cm: np.ndarray, class_names: Sequence[str], path: Path, title: str) -> None:
     cm = np.asarray(cm)
     norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
