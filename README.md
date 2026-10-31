@@ -13,7 +13,7 @@ bounding box can be computed exactly, for any frame, with zero annotation. This 
 the same synthetic-data technique used in robotics and autonomous driving, at
 hobby scale.
 
-**Status: Stage 2a (species classifier) complete; 2b (detector) next.**
+**Status: Stage 2b baseline detector trained (test AP 0.478, AP50 0.827); error analysis points at occlusion, truncation and the ignore-threshold boundary.**
 
 ## Roadmap
 
@@ -21,7 +21,7 @@ hobby scale.
 |---|---|---|
 | 1 ✅ | Synthetic scene + automatic pixel-accurate labels | `datagen/` |
 | 2a ✅ | Per-instance species classifier; data-efficiency study | `training/` |
-| 2b | Object detector (PyTorch) | `training/` |
+| 2b ✅ | CenterNet detector (baseline) + error analysis | `training/` |
 | 3 | Evaluation: mAP by depth band and distance, failure analysis | `training/` |
 | 4 | ONNX export, quantization, live in-browser inference | `datagen/` |
 
@@ -145,6 +145,82 @@ sub-percent differences are within noise) separates the models:
   those steps. BN statistic accumulation under autocast also overflowed. AMP is
   therefore opt-in (`--amp`).
 
+## Stage 2b — detector
+
+```bash
+python -m fishnet.train_detector --overfit 8 --epochs 150 --eval-every 25   # pipeline sanity check
+python -m fishnet.train_detector --run-name centernet-r18-baseline
+python -m fishnet.inspect_detector centernet-r18-baseline                   # error analysis
+```
+
+**Model.** CenterNet-style, NMS-free: ImageNet ResNet-18 backbone with frozen BN
+(FrozenBatchNorm2d), a top-down GroupNorm neck (1×1 laterals + nearest upsample,
+C5 → stride 4, 128 ch) and three heads (per-class centre heatmap, log-size, sub-cell
+offset). 11.96M parameters. Decoding is 3×3 max-pool peak extraction + top-300.
+
+**Targets.** TTFNet-style elliptical Gaussians (σ = 0.54·size/6) on a stride-4 grid;
+L1 on log(w), log(h) and offsets at centre cells; on centre-cell collisions the
+smaller instance owns the regression targets. Ignore boxes zero the *negative*
+focal-loss term for all classes (positives inside them are still supervised).
+
+**Loss / optimisation.** Penalty-reduced focal loss (α=2, β=4) + L1 terms (weights
+1/1/1); AdamW (lr 3e-4, wd 1e-4), 1-epoch warmup + cosine, grad-norm clip 35,
+batch 8, 40 epochs, fp32, hflip + brightness/contrast jitter. Model selection on val
+AP@[.5:.95] every 2 epochs.
+
+**Evaluation.** pycocotools COCOeval with maxDets=300 and ignore boxes registered as
+`iscrowd=1` under every category, so detections on ignore regions are neither TP
+nor FP regardless of class. Area ranges match the classifier strata
+(<150, 150–400, 400–1500, >1500 px²). An `--overfit 8` run (150 steps) reaches AP
+0.944 on its own training frames, validating targets → loss → decode → eval.
+
+### Results (test, 140 frames, 1,694 instances)
+
+| AP@[.5:.95] | AP50 | AP75 | AR@300 |
+|---|---|---|---|
+| 0.478 | 0.827 | 0.503 | 0.567 |
+
+| | anchovy | jack | grouper | | <150 px² | 150–400 | 400–1500 | >1500 |
+|---|---|---|---|---|---|---|---|---|
+| AP | 0.325 | 0.468 | 0.642 | | 0.349 | 0.473 | 0.586 | 0.576 |
+
+![Detector training curves](docs/figures/detector_baseline_curves.png)
+
+Val AP plateaus from ~epoch 20 (best: epoch 24) while training loss keeps falling;
+the AP50–AP gap reflects localisation precision on small boxes, where a 1–2 px
+error fails the stricter IoU thresholds.
+
+### Error analysis
+
+Operating point chosen on val (max F1@IoU0.5 → score 0.40): test precision 0.871,
+recall 0.771, F1 0.818. Recall stratified on test:
+
+| Factor | Strata → recall |
+|---|---|
+| Nearer-instance box coverage | <25%: 0.842 · 25–50%: 0.744 · 50–75%: 0.540 · ≥75%: 0.288 |
+| Frame-edge truncation | interior: 0.784 · edge: 0.589 |
+| Box area (px²) | <150: 0.693 · 150–400: 0.762 · 400–1500: 0.876 · >1500: 0.800 |
+| Fog visibility | <0.3: 0.725 · 0.3–0.5: 0.783 · 0.5–0.7: 0.839 · ≥0.7: 0.756 |
+
+False positives at the operating point: 128 background, 57 mislocalised
+(including duplicates), 9 wrong-class. Findings:
+
+- **Occlusion dominates.** The labeler emits every in-frustum instance regardless of
+  occlusion; ~6% of positives are ≥75% box-covered by nearer fish (~2% ≥95%), and
+  recall on them is 0.29. Part of this is label noise rather than model error;
+  per-instance visible-pixel fractions from an ID-buffer render would fix it at the
+  source.
+- **Truncation** at the frame edge costs ~20 points of recall.
+- **Fog/depth is a weak factor** at this difficulty; the non-monotonic visibility
+  curve is likely confounded with proximity (near instances are larger, more often
+  truncated, and inside dense close-range schools).
+- **Classification is solved** (9 wrong-class FPs), consistent with Stage 2a.
+- Errors concentrate in distant schools where ignore specks (<80 px²) neighbour
+  barely-positive instances: the hard area threshold makes near-identical objects
+  alternately ignored and supervised.
+
+![Error overlay: red = missed, magenta = false positive, grey = ignore region](docs/figures/detector_error_overlay.png)
+
 ## Architecture
 
 ```
@@ -173,6 +249,16 @@ training/
 │   ├── metrics.py        Confusion, per-class P/R/F1, stratified accuracy
 │   ├── train_classifier.py
 │   ├── sweep_data_efficiency.py
-│   └── inspect_data.py
+│   ├── inspect_data.py
+│   ├── train_detector.py
+│   ├── inspect_detector.py   Threshold selection, stratified recall, FP taxonomy
+│   └── detection/
+│       ├── targets.py        Box → heatmap/size/offset/ignore encoding
+│       ├── decode.py         NMS-free peak decoding
+│       ├── model.py          CenterNet (ResNet-18, frozen BN, GN neck)
+│       ├── loss.py           Focal heatmap loss with ignore mask, masked L1
+│       ├── data.py           Full-frame dataset, box-consistent hflip
+│       ├── evaluate.py       COCO AP/AR with class-agnostic ignore regions
+│       └── analysis.py       IoU, greedy matching, occlusion proxy
 └── tests/
 ```
