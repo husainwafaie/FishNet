@@ -63,6 +63,11 @@ def _binned(values, hits, edges) -> list[dict]:
     return rows
 
 
+def is_truncated(b, img_w: int, img_h: int, eps: float = 0.5) -> bool:
+    """Box clipped by the viewport (labels are clamped to the frame by the datagen labeler)."""
+    return b.x <= eps or b.y <= eps or b.x + b.w >= img_w - eps or b.y + b.h >= img_h - eps
+
+
 def _fp_kind(box, cls, sample: Sample) -> str:
     pos = [b for b in sample.boxes if not b.ignore]
     if not pos:
@@ -118,7 +123,7 @@ def main(argv: list[str] | None = None) -> None:
     test = DetectionSet(parts["test"], train=False, desc="test frames")
     test_dets = [_keep(d, thr) for d in predict(model, test, pre, device, 8, False)]
 
-    rec = {"class": [], "area": [], "visibility": [], "coverage": [], "hit": []}
+    rec = {"class": [], "area": [], "visibility": [], "coverage": [], "truncated": [], "hit": []}
     fp_kinds: Counter = Counter()
     det_counts: Counter = Counter()
     per_image = []
@@ -131,6 +136,7 @@ def main(argv: list[str] | None = None) -> None:
             rec["area"].append(b.area)
             rec["visibility"].append(b.visibility)
             rec["coverage"].append(c)
+            rec["truncated"].append(is_truncated(b, s.width, s.height))
             rec["hit"].append(bool(hit))
         for box, cls, status in zip(d.boxes, d.classes, m.det_status):
             det_counts[status] += 1
@@ -138,7 +144,7 @@ def main(argv: list[str] | None = None) -> None:
                 fp_kinds[_fp_kind(box, int(cls), s)] += 1
         per_image.append((int((~m.gt_matched).sum()) + int((m.det_status == "fp").sum()), s, d, m))
 
-    hits, cls = np.array(rec["hit"]), np.array(rec["class"])
+    hits, cls, trunc = np.array(rec["hit"]), np.array(rec["class"]), np.array(rec["truncated"])
     tp, fp = det_counts["tp"], det_counts["fp"]
     report = {
         "threshold": thr,
@@ -151,6 +157,10 @@ def main(argv: list[str] | None = None) -> None:
             "recall_by_area": _binned(rec["area"], hits, AREA_BINS),
             "recall_by_visibility": _binned(rec["visibility"], hits, VISIBILITY_BINS),
             "recall_by_coverage": _binned(rec["coverage"], hits, COVERAGE_BINS),
+            "recall_by_truncation": {
+                "interior": {"n": int((~trunc).sum()), "recall": float(hits[~trunc].mean())},
+                "frame_edge": {"n": int(trunc.sum()), "recall": float(hits[trunc].mean()) if trunc.any() else None},
+            },
             "detections": dict(det_counts),
             "false_positive_kinds": dict(fp_kinds),
         },
@@ -168,6 +178,9 @@ def main(argv: list[str] | None = None) -> None:
         cells = "  ".join(f"[{r['lo']:g},{r['hi']:g}) {r['recall']:.3f} n={r['n']}" for r in t[f"recall_by_{key}"]
                           if r["recall"] is not None)
         print(f"recall by {key:<11} {cells}")
+    tr = t["recall_by_truncation"]
+    print(f"recall by truncation interior {tr['interior']['recall']:.3f} n={tr['interior']['n']}  "
+          f"frame_edge {tr['frame_edge']['recall'] or 0:.3f} n={tr['frame_edge']['n']}")
     print(f"detections: {dict(det_counts)} | false positives: {dict(fp_kinds)}")
     print(f"wrote {out_dir}")
 
