@@ -69,6 +69,14 @@ def test_preprocess_eval_is_deterministic_and_normalised():
     assert torch.allclose(out[0, :, 0, 0], expected, atol=1e-5)
 
 
+def test_preprocess_photometric_only_preserves_spatial_layout():
+    torch.manual_seed(0)
+    x = torch.zeros(16, 3, 8, 8, dtype=torch.uint8)
+    x[:, :, :, :4] = 200  # bright left half
+    out = Preprocess(train=True, geometric=False)(x)
+    assert (out[:, :, :, :4].mean(dim=(1, 2, 3)) > out[:, :, :, 4:].mean(dim=(1, 2, 3))).all()
+
+
 def test_preprocess_train_keeps_shape_and_range():
     torch.manual_seed(0)
     x = torch.randint(0, 256, (8, 3, 24, 24), dtype=torch.uint8)
