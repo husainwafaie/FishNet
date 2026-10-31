@@ -21,6 +21,7 @@ from .detection.evaluate import MAX_DETS, ImageDetections, evaluate
 from .detection.loss import centernet_loss
 from .detection.model import CenterNet
 from .labels import NUM_CLASSES, load_samples
+from .plots import plot_detector_history
 from .splits import partition
 from .train_classifier import seed_everything, warmup_cosine
 
@@ -162,6 +163,7 @@ def main(argv: list[str] | None = None) -> dict:
                                   predict(model, sets[split], eval_pre, device, args.batch_size, use_amp))
     (run_dir / "history.json").write_text(json.dumps(history, indent=2))
     (run_dir / "metrics.json").write_text(json.dumps(results, indent=2))
+    plot_detector_history(history, run_dir / "curves.png")
 
     te = results["test"]
     print(f"\nbest epoch {best_epoch} ({train_seconds:.0f}s) | test AP {te['AP']:.3f} AP50 {te['AP50']:.3f} "
